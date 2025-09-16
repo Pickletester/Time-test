@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Court Display — 10 (TIME GOLD • Soft Pulse • Clean)</title>
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    html, body { margin:0; padding:0; width:100vw; height:100vh; overflow:hidden; background:transparent; font-family: Arial, Helvetica, sans-serif; }
+    :root {
+      --bar-height: 72px;
+      --pulse-dur: 900ms;
+      --pulse-min: .12;
+      --pulse-max: .45;
+      --pulse-border: 3px;
+      --global-min: .05;
+      --global-max: .18;
+    }
+
+    .graphic-bar{
+      position:fixed; left:0; right:0; bottom:0; height:var(--bar-height);
+      background: linear-gradient(90deg,#14203a,#22335d 70%);
+      display:grid;
+      grid-template-columns: 1.3fr 2.2fr 1.1fr 2.1fr 1.3fr;
+      gap:4px; padding:4px 6px; box-sizing:border-box; z-index:1000;
+    }
+    .section{ position:relative; display:flex; flex-direction:column; justify-content:center; align-items:center; overflow:hidden; border-radius:6px; isolation:isolate; }
+    .section .compat-bg{ position:absolute; left:3px; right:3px; top:3px; bottom:3px; background:#000; opacity:0.78; border-radius:6px; z-index:0; pointer-events:none; }
+    #court-number .compat-bg{ display:none !important; }
+
+    .label{ font-weight:700; text-transform:uppercase; font-size:10px; letter-spacing:0.08em; z-index:2; margin-bottom:1px; }
+    #current-event .label{ color:#6cff6c; } #next-event .label{ color:#ffe56b; }
+    #countdown .label{ color:#d4e5fd; }    #current-time .label{ color:#d4e5fd; }
+    .meta{ font-size:10px; color:#d8d8d8; opacity:.9; line-height:1.05; }
+    .value{ font-weight:800; z-index:2; text-align:center; line-height:1.05; color:#fff; padding:0 4px; }
+    #current-event .value, #next-event .value{ font-size:14px; max-height:none !important; overflow:visible !important; white-space:normal; overflow-wrap:anywhere; word-break:break-word; padding:0 6px 3px; align-self:center; }
+    #countdown .value{ font-size:20px; } #current-time .value{ font-size:16px; }
+    #court-number{ display:flex; align-items:center; justify-content:center; }
+    #court-number .value{ font-size:58px; font-weight:900; padding:2px 12px; letter-spacing:0.02em; border:2px solid #ffffff; border-radius:8px; text-shadow:0 1px 2px rgba(0,0,0,0.4); background:linear-gradient(180deg, rgba(255,255,255,0.10), rgba(255,255,255,0.03)); color:#fff; line-height:1; }
+
+    #countdown .cdFill, #countdown .cdBorder{
+      position:absolute; left:2px; right:2px; top:2px; bottom:2px;
+      border-radius:6px; pointer-events:none; z-index:1; display:none; transform-origin:center center;
+    }
+    #countdown.under-minute .cdFill{ display:block; background:#ff0000; animation: pulseSmooth var(--pulse-dur) ease-in-out infinite; }
+    #countdown.under-minute .cdBorder{ display:block; border: var(--pulse-border) solid rgba(255,0,0,var(--pulse-min)); animation: borderSmooth var(--pulse-dur) ease-in-out infinite; }
+    @keyframes pulseSmooth{ 0%{opacity:var(--pulse-min); transform:scale(1)} 50%{opacity:var(--pulse-max); transform:scale(1.03)} 100%{opacity:var(--pulse-min); transform:scale(1)} }
+    @keyframes borderSmooth{ 0%{opacity:var(--pulse-min)} 50%{opacity:var(--pulse-max)} 100%{opacity:var(--pulse-min)} }
+    #globalPulse{ position:fixed; left:0; top:0; right:0; bottom:0; background:#ff0000; opacity:0; pointer-events:none; display:none; z-index:99999; }
+    body.global-under-minute #globalPulse{ display:block; animation: globalSmooth var(--pulse-dur) ease-in-out infinite; }
+    @keyframes globalSmooth{ 0%{opacity:var(--global-min)} 50%{opacity:var(--global-max)} 100%{opacity:var(--global-min)} }
+
+    body.global-under-minute #globalPulse,
+    body.global-under-minute #countdown .cdFill,
+    body.global-under-minute #countdown .cdBorder{ animation-delay: var(--pulse-phase, 0ms); }
+
+    *{ -webkit-user-select:none; user-select:none; }
+  </style>
+</head>
+<body>
+  <!-- Clean layout: no top badges -->
+  <div class="graphic-bar" id="bar">
+    <div id="court-number" class="section"><div class="value" id="court-val">10</div></div>
+    <div id="current-event" class="section"><div class="compat-bg"></div><div class="label" id="cur-label">In Progress</div><div class="value" id="cur-val">Loading...</div></div>
+    <div id="countdown" class="section"><div class="compat-bg"></div><div class="label" id="cd-label">Time Left</div><div class="value" id="cd-val">--</div><div class="cdFill"></div><div class="cdBorder"></div></div>
+    <div id="next-event" class="section"><div class="compat-bg"></div><div class="label">Upcoming</div><div class="value" id="next-val">Loading next...</div></div>
+    <div id="current-time" class="section"><div class="compat-bg"></div><div class="label">Current Time</div><div class="value" id="clock">--:--</div></div>
+  </div>
+  <div id="globalPulse"></div>
+
+  <script>
+    /* ===== Time engine with robust fallback (prevents stuck times) ===== */
+    let NET_BASE_MS = Date.now();           // anchor immediately to LOCAL
+    let NET_BASE_T  = performance.now();    // perf reference
+    const PHASE_MS  = 700;
+
+    const BURST_WINDOW_MS = 120000; // 2 min aggressive resync
+    const BURST_INTERVAL_MS = 2000;
+    const RESYNC_MS = 5000;         // steady state
+    const SAMPLE_TIMEOUT_MS = 4000; // per time sample
+
+    let lastRTTms = 0, lastSrc = 'LOCAL', lastErr = '', startPerf = performance.now();
+    let COURT_NO = 10;
+    const AUTH_B64 = "Basic T3JnXzEyNjc0OjEyNjc0XzE4NWFmZGE3LTdiNGYtNGIwYS04YmEwLWE3OWVhYzc4ODExZA==";
+    const ORG_MEMBER_ID = "12674";
+    const TZ = "America/New_York";
+
+    const params = new URLSearchParams(location.search);
+    const DEBUG = params.get('debug') === '1';
+    const SYNC_DOT = params.get('syncdot') === '1';
+    const SHOW_BADGES = params.get('showbadges') === '1'; // if you ever want badges back
+    const TIMEMODE = (params.get('timemode')||'net').toLowerCase(); // net | local
+
+    (function(){
+      const q=parseInt(params.get('court'),10);
+      if(!isNaN(q)&&q>0){ COURT_NO=q; const cv=document.getElementById('court-val'); if(cv) cv.textContent=String(COURT_NO); }
+    })();
+
+    function parseHttpDate(dateStr){ const t=Date.parse(dateStr); return isNaN(t)? null : t; }
+    function nowMs(){ return NET_BASE_MS + (performance.now() - NET_BASE_T); }
+    function setPulsePhase(){ const phase = nowMs()%PHASE_MS; document.documentElement.style.setProperty('--pulse-phase', `-${phase}ms`); }
+
+    function dbgInit(){
+      if(!(DEBUG || SYNC_DOT || SHOW_BADGES)) return;
+      // Create overlays only when requested
+      if (SHOW_BADGES){
+        const pill = document.createElement('div'); pill.id='pill'; pill.textContent='NET TIME'; pill.style.cssText='position:fixed;top:6px;left:6px;background:rgba(60,180,90,.9);color:#fff;padding:4px 8px;border-radius:999px;font-size:11px;font-weight:700;z-index:2000;'; document.body.appendChild(pill);
+        const mode = document.createElement('div'); mode.id='modebadge'; mode.style.cssText='position:fixed;top:6px;left:72px;background:rgba(0,0,0,.55);color:#ffd86b;padding:4px 8px;border-radius:8px;font-size:10px;z-index:2000;'; mode.textContent='MODE: NET'; document.body.appendChild(mode);
+        const ver = document.createElement('div'); ver.id='ver'; ver.style.cssText='position:fixed;top:6px;right:6px;background:rgba(0,0,0,.5);color:#fff;padding:4px 8px;border-radius:8px;font-size:10px;z-index:2000;'; ver.textContent='TIME GOLD v1 • Soft Pulse • Clean'; document.body.appendChild(ver);
+      }
+      if (DEBUG){
+        const d = document.createElement('div'); d.id='debug'; d.style.cssText='position:fixed;top:32px;right:6px;background:rgba(0,0,0,.6);color:#fff;padding:6px 8px;border-radius:8px;font-size:11px;z-index:2000;white-space:pre-line;max-width:48vw;'; document.body.appendChild(d);
+      }
+      if (SYNC_DOT){
+        const s = document.createElement('div'); s.id='syncdot'; s.style.cssText='position:fixed;top:6px;left:50%;width:10px;height:10px;margin-left:-5px;border-radius:50%;background:#0f0;z-index:2000;'; document.body.appendChild(s);
+      }
+    }
+
+    function dbgUpdate(){
+      const d = document.getElementById('debug'); if(!d) return;
+      const estErr = Math.round(lastRTTms/2);
+      d.textContent = `src: ${lastSrc}\nRTT: ${Math.round(lastRTTms)} ms\nest error: ±${estErr} ms\nnow: ${new Date(nowMs()).toLocaleTimeString('en-US',{hour12:true})}\n${lastErr?('err: '+lastErr):''}`;
+    }
+
+    function dayStringInTZ(ms, tz){ const f=new Intl.DateTimeFormat('en-CA',{timeZone:tz,year:'numeric',month:'2-digit',day:'2-digit'}); return f.format(new Date(ms)); }
+    function eventUrl(dayStr){ return `https://api.courtreserve.com/api/v1/eventcalendar/eventlist?orgMemberId=${ORG_MEMBER_ID}&startDate=${dayStr}T00:00:00&endDate=${dayStr}T23:59:59`; }
+    function withTimeout(promise, ms){ return new Promise((resolve, reject)=>{ const t=setTimeout(()=>reject(new Error('timeout')), ms); promise.then(v=>{clearTimeout(t);resolve(v)}).catch(e=>{clearTimeout(t);reject(e)}); }); }
+
+    async function sampleCR(){
+      const day = dayStringInTZ(Date.now(), "America/New_York");
+      const url = eventUrl(day);
+      const t0 = performance.now();
+      const resp = await withTimeout(fetch(url, { cache:'no-store', headers:{ Authorization: AUTH_B64 } }), 4000);
+      const t2 = performance.now();
+      const hdr = resp.headers.get('Date'); const ms = hdr? parseHttpDate(hdr):null;
+      if(ms==null) throw new Error('CR no date');
+      return { baseMs: ms, baseT: (t0+t2)/2, rtt: t2-t0, src:'CR' };
+    }
+    async function sampleWTA(){
+      if ((params.get('timemode')||'net').toLowerCase()==='local') throw new Error('local-mode');
+      const url='https://worldtimeapi.org/api/timezone/Etc/UTC';
+      const t0 = performance.now();
+      const resp = await withTimeout(fetch(url, { cache:'no-store' }), 4000);
+      const t2 = performance.now();
+      let ms=null;
+      try{ const data=await resp.clone().json(); if(typeof data.unixtime==='number') ms = data.unixtime*1000; }catch(_){}
+      if(ms==null){ const hdr=resp.headers.get('Date'); const hdrMs=hdr? parseHttpDate(hdr):null; if(hdrMs!=null) ms=hdrMs; }
+      if(ms==null) throw new Error('WTA no time');
+      return { baseMs: ms, baseT: (t0+t2)/2, rtt: t2-t0, src:'WTA' };
+    }
+    async function takeSamples(){
+      if ((params.get('timemode')||'net').toLowerCase()==='local') throw new Error('forcing local');
+      const arr=[];
+      for(let i=0;i<3;i++){ try{ arr.push(await sampleCR()); }catch(e){ lastErr=e.message; } }
+      for(let i=0;i<2;i++){ try{ arr.push(await sampleWTA()); }catch(e){ lastErr=e.message; } }
+      if(!arr.length) throw new Error('No time samples');
+      arr.sort((a,b)=> a.rtt - b.rtt);
+      const bestHalf = arr.slice(0, Math.max(1, Math.ceil(arr.length/2)));
+      bestHalf.sort((a,b)=> a.baseMs - b.baseMs);
+      return bestHalf[Math.floor(bestHalf.length/2)];
+    }
+    async function syncTime(){
+      try{
+        const s = await takeSamples();
+        NET_BASE_MS = s.baseMs;
+        NET_BASE_T  = s.baseT;
+        lastRTTms = s.rtt; lastSrc = s.src; lastErr='';
+      }catch(e){
+        lastErr = e.message || String(e);
+        lastSrc = 'LOCAL';
+        NET_BASE_MS = Date.now();
+        NET_BASE_T  = performance.now();
+      } finally {
+        setPulsePhase();
+        dbgUpdate();
+      }
+    }
+
+    (function secondDot(){
+      if(!SYNC_DOT) return;
+      function tick(){
+        const s = Math.floor(nowMs()/1000)%2;
+        const dot = document.getElementById('syncdot'); if(dot) dot.style.background = s ? '#0f0' : '#08f';
+        const ms = 1000 - (performance.now()%1000);
+        setTimeout(tick, Math.max(100, ms));
+      }
+      tick();
+    })();
+
+    /* ===== Event/Reservation fetch + UI ===== */
+    function parseTimeAny(t, baseDateLocal=null){
+      if(t==null || t==="") return null;
+      if(t instanceof Date) return isNaN(t.getTime())? null : t;
+      if(typeof t==="number"){ return new Date(t>1e12 ? t : t*1000); }
+      if(typeof t==="string"){
+        const s=t.trim();
+        const m=s.match(/^\/Date\((\d+)\)\/$/i); if(m) return new Date(parseInt(m[1],10));
+        if(/^\d{1,2}:\d{2}(\s*[AP]M)?$/i.test(s)){
+          const base=baseDateLocal || new Date();
+          const [hhmm,ampmRaw]=s.split(/\s+/); let [hh,mm]=hhmm.split(':').map(x=>parseInt(x,10));
+          const ampm=ampmRaw? ampmRaw.toUpperCase():null;
+          if(ampm){ if(ampm==='PM'&&hh<12) hh+=12; if(ampm==='AM'&&hh===12) hh=0; }
+          return new Date(base.getFullYear(), base.getMonth(), base.getDate(), hh, mm, 0, 0);
+        }
+        const d=new Date(s); if(!isNaN(d.getTime())) return d;
+      }
+      return null;
+    }
+    function pickArray(container){
+      if(!container) return [];
+      if(Array.isArray(container)) return container;
+      if(typeof container==='object'){
+        const keys=['Data','data','Results','Items','Reservations','ReservationList'];
+        for(const k of keys){ if(Array.isArray(container[k])) return container[k]; }
+        if(container.Data && typeof container.Data==='object'){
+          for(const k of keys){ if(Array.isArray(container.Data[k])) return container.Data[k]; }
+        }
+      }
+      return [];
+    }
+    function collectNumbersFromString(str){
+      const s=String(str||'').toLowerCase(); const set=new Set(); let m;
+      const rangeRe=/(\d{1,2})\s*[-–]\s*(\d{1,2})/g; while((m=rangeRe.exec(s))!==null){ const a=+m[1], b=+m[2]; for(let i=Math.min(a,b); i<=Math.max(a,b); i++) set.add(i); }
+      const listRe=/(?:^|[^\d])(\d{1,2})(?=\s*[,&]|$)/g; while((m=listRe.exec(s))!==null){ set.add(+m[1]); }
+      const labeledRe=/(?:court|crt|ct|resource|rm)\s*#?-?\s*(\d{1,2})/g; while((m=labeledRe.exec(s))!==null){ set.add(+m[1]); }
+      return set;
+    }
+    function extractCourtNumbersDeep(value, depth=0){
+      const out=new Set();
+      if(value==null||depth>5) return [];
+      if(typeof value==='number'&&Number.isFinite(value)) return [value];
+      if(typeof value==='string'){
+        collectNumbersFromString(value).forEach(n=>out.add(n));
+        value.split(/[;,]/).forEach(tok=>{ const n=parseInt(tok.trim(),10); if(Number.isFinite(n)) out.add(n); });
+        return Array.from(out);
+      }
+      if(Array.isArray(value)){ value.forEach(v=>extractCourtNumbersDeep(v,depth+1).forEach(n=>out.add(n))); return Array.from(out); }
+      if(typeof value==='object'){
+        const preferred=['Courts','Court','CourtName','CourtNumber','CourtIds','CourtId','CourtNumbers','CourtsText','CourtNames','CourtNamesCsv','Resources','Resource','ResourceName','ResourceIds'];
+        preferred.forEach(k=>{ if(k in value) extractCourtNumbersDeep(value[k],depth+1).forEach(n=>out.add(n)); });
+        Object.keys(value).forEach(k=>{ if(/court|resource/i.test(k)) extractCourtNumbersDeep(value[k],depth+1).forEach(n=>out.add(n)); });
+        return Array.from(out);
+      }
+      return [];
+    }
+    function matchesCourtStrict(record, n){ const nums=extractCourtNumbersDeep(record); return nums.includes(n); }
+    function matchesCourtAny(record, n){ if(!record) return true; if(Number(record.CourtNumber)===n) return true; const nums=extractCourtNumbersDeep(record); return nums.includes(n); }
+
+    async function fetchJSON(url){
+      const r=await fetch(url,{headers:{Authorization:AUTH_B64}});
+      if(!r.ok) throw new Error(r.status+' '+r.statusText);
+      return r.json();
+    }
+
+    function toNY(dateMs){ return new Date(dateMs).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:true,timeZone:"America/New_York"}); }
+    function dayNY(){ const f=new Intl.DateTimeFormat('en-CA',{timeZone:"America/New_York",year:'numeric',month:'2-digit',day:'2-digit'}); return f.format(new Date(nowMs())); }
+
+    let countdownTimeout=null, nextEventTime=null;
+
+    function updatePulseFromSeconds(sec){
+      const s = Math.max(0, Math.min(60, sec));
+      const f = (60 - s) / 60;
+      const dur = 1800 - f * (1800 - 350);
+      const pmin = 0.10 + f * 0.18;
+      const pmax = 0.35 + f * 0.55;
+      const bpx  = 2 + Math.round(f * 4);
+      const gmin = 0.03 + f * 0.07;
+      const gmax = 0.12 + f * 0.20;
+      const root = document.documentElement.style;
+      root.setProperty('--pulse-dur', Math.round(dur)+'ms');
+      root.setProperty('--pulse-min', pmin.toFixed(3));
+      root.setProperty('--pulse-max', Math.min(0.95, pmax).toFixed(3));
+      root.setProperty('--pulse-border', bpx+'px');
+      root.setProperty('--global-min', gmin.toFixed(3));
+      root.setProperty('--global-max', gmax.toFixed(3));
+    }
+
+    function startCountdown(target){
+      clearTimeout(countdownTimeout);
+      function tick(){
+        const now = nowMs();
+        const diff  = target - now;
+        const el=document.getElementById('cd-val');
+        const box=document.getElementById('countdown');
+
+        if(diff>0){
+          const totalSec = Math.floor(diff/1000);
+          const totalMin = Math.floor(diff/60000);
+          if (diff <= 60000) {
+            const s = totalSec % 60;
+            el.textContent = s + 's';
+            updatePulseFromSeconds(s);
+            if (box) box.classList.add('under-minute');
+            document.body.classList.add('global-under-minute');
+            setPulsePhase();
+          } else {
+            if (totalMin >= 60) {
+              const h = Math.floor(totalMin/60);
+              const rem = totalMin % 60;
+              el.textContent = h + 'h ' + rem + 'm';
+            } else {
+              el.textContent = totalMin + 'm';
+            }
+            el.style.color = '#fff';
+            if (box) box.classList.remove('under-minute');
+            document.body.classList.remove('global-under-minute');
+          }
+          const ms = 1000 - (performance.now()%1000);
+          countdownTimeout = setTimeout(tick, Math.max(250, ms));
+        } else {
+          el.textContent='Time Expired'; el.style.color='#ff4d4d';
+          if (box) box.classList.remove('under-minute');
+          document.body.classList.remove('global-under-minute');
+          clearTimeout(countdownTimeout);
+        }
+      }
+      tick();
+    }
+
+    async function refresh(){
+      try{
+        const d = dayNY();
+        const evUrl=`https://api.courtreserve.com/api/v1/eventcalendar/eventlist?orgMemberId=${ORG_MEMBER_ID}&startDate=${d}T00:00:00&endDate=${d}T23:59:59`;
+        const resUrl=`https://api.courtreserve.com/api/v1/reservationreport/listactive?reservationsFromDate=${d}&reservationsToDate=${d}`;
+
+        const [eRaw, rRaw] = await Promise.all([ fetchJSON(evUrl), fetchJSON(resUrl) ]);
+        const eArr=pickArray(eRaw); const rArr=pickArray(rRaw);
+        const baseDateLocal=new Date(nowMs());
+
+        const events=eArr.map(x=>{
+          const start=parseTimeAny(x.StartDateTime||x.StartTime||x.Start, baseDateLocal);
+          const end=parseTimeAny(x.EndDateTime||x.EndTime||x.End, baseDateLocal);
+          return { source:'event', raw:x, name:x.EventName||x.Name||'Event', start, end };
+        }).filter(it=> it.start && it.end);
+
+        const reservations=rArr.map(x=>{
+          const start=parseTimeAny(x.StartTime||x.StartDateTime||x.Start, baseDateLocal);
+          const end=parseTimeAny(x.EndTime||x.EndDateTime||x.End, baseDateLocal);
+          const nm=(function(){
+            const players=Array.isArray(x.Players)?x.Players:[];
+            const pn=players.map(p=>{ const fn=(p.FirstName||'').trim(), ln=(p.LastName||'').trim(); return fn&&ln ? `${fn} ${(ln[0]||'')}.` : (fn+' '+ln).trim(); }).filter(Boolean);
+            if(pn.length) return pn.join(', ');
+            const fields=['MemberDisplayName','OrganizerName','Organizer','MemberName','MemberFullName','OwnerName','BookedByName','BookerName','CreatedByName','ReservationOwnerName','PrimaryMemberName','CreatedBy','DisplayName','ReservationName','Title','Description','Notes','PlayersText','CreatedByDisplayName'];
+            for(const k of fields){ if(x[k] && String(x[k]).trim()) return String(x[k]).trim(); }
+            if(x.ReservationTypeName && x.ReservationTypeName.trim()) return x.ReservationTypeName.trim();
+            return 'Reserved';
+          })();
+          return { source:'reservation', raw:x, name:nm, start, end };
+        }).filter(it=> it.start && it.end);
+
+        const reservationsForCourt=reservations.filter(it=> matchesCourtStrict(it.raw, COURT_NO));
+        let eventsForCourt=events.filter(it=> matchesCourtStrict(it.raw, COURT_NO));
+        if(eventsForCourt.length===0){ eventsForCourt=events.filter(it=> matchesCourtAny(it.raw, COURT_NO) || extractCourtNumbersDeep(it.raw).length===0); }
+
+        const forCourt=reservationsForCourt.concat(eventsForCourt).sort((a,b)=> a.start - b.start);
+
+        const nowLocal=new Date(nowMs());
+        let cur=null, nxt=null;
+        for(const item of forCourt){ if(!cur && nowLocal>=item.start && nowLocal<=item.end) cur=item; if(!nxt && nowLocal<item.start) nxt=item; }
+        nextEventTime = nxt ? nxt.start.getTime() : null;
+
+        const curEl=document.getElementById('cur-val'); const cdLabel=document.getElementById('cd-label'); const cdVal=document.getElementById('cd-val'); const nextEl=document.getElementById('next-val');
+        if(cur){ curEl.innerHTML=`${cur.name}<div class='meta'>${toNY(cur.start.getTime())} - ${toNY(cur.end.getTime())}</div>`; cdLabel.textContent='Time Left'; startCountdown(cur.end.getTime()); }
+        else{ curEl.textContent='No current event'; if(nxt){ cdLabel.textContent='Time Until'; startCountdown(nxt.start.getTime()); } else { cdVal.textContent='--'; } }
+        if(nxt){ nextEl.innerHTML=`${nxt.name}<div class='meta'>${toNY(nxt.start.getTime())} - ${toNY(nxt.end.getTime())}</div>`; } else { nextEl.textContent='No upcoming event'; }
+      }catch(e){
+        lastErr = e.message || String(e);
+        dbgUpdate();
+      }
+    }
+
+    function tickClock(){
+      const el=document.getElementById('clock');
+      el.textContent = new Date(nowMs()).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:true,timeZone:"America/New_York"});
+      const ms = 1000 - (performance.now()%1000);
+      setTimeout(tickClock, Math.max(250, ms));
+    }
+
+    function init(){
+      ['current-event','countdown','next-event','current-time'].forEach(id=>{
+        const sec=document.getElementById(id);
+        if(sec && !sec.querySelector('.compat-bg')){ const bg=document.createElement('div'); bg.className='compat-bg'; sec.insertBefore(bg, sec.firstChild); }
+      });
+
+      dbgInit();
+
+      // Start UI right away on LOCAL (prevents any initial freeze)
+      NET_BASE_MS = Date.now();
+      NET_BASE_T  = performance.now();
+      setPulsePhase();
+      tickClock();
+      refresh();
+      setInterval(refresh, 30000);
+
+      // Background net sync loop (never blocks UI)
+      (function schedule(){
+        const elapsed = performance.now() - startPerf;
+        syncTime();
+        setTimeout(schedule, elapsed < BURST_WINDOW_MS ? BURST_INTERVAL_MS : RESYNC_MS);
+      })();
+    }
+    document.addEventListener('DOMContentLoaded', init);
+  </script>
+</body>
+</html>
